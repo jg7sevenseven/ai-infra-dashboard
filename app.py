@@ -7,7 +7,7 @@ Watchlist and entry prices persisted in Supabase.
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+import ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
@@ -89,11 +89,22 @@ def fetch_history(ticker: str, period: str = "3mo") -> pd.DataFrame:
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df.ta.rsi(length=14, append=True)
-    df.ta.macd(fast=12, slow=26, signal=9, append=True)
-    df.ta.bbands(length=20, std=2, append=True)
-    df.ta.ema(length=50, append=True)
-    df.ta.ema(length=200, append=True)
+    close = df["Close"]
+    # RSI
+    df["RSI_14"] = ta.momentum.RSIIndicator(close, window=14).rsi()
+    # EMA
+    df["EMA_50"]  = ta.trend.EMAIndicator(close, window=50).ema_indicator()
+    df["EMA_200"] = ta.trend.EMAIndicator(close, window=200).ema_indicator()
+    # MACD
+    macd_ind = ta.trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
+    df["MACD_12_26_9"]  = macd_ind.macd()
+    df["MACDs_12_26_9"] = macd_ind.macd_signal()
+    df["MACDh_12_26_9"] = macd_ind.macd_diff()
+    # Bollinger Bands
+    bb = ta.volatility.BollingerBands(close, window=20, window_dev=2)
+    df["BBU_20"] = bb.bollinger_hband()
+    df["BBM_20"] = bb.bollinger_mavg()
+    df["BBL_20"] = bb.bollinger_lband()
     return df
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -229,32 +240,26 @@ if show_indicators:
         ind_rows = []
         for ticker in tickers:
             try:
-                hist = fetch_history(ticker, period=chart_period)
-                hist = compute_indicators(hist)
+                hist  = fetch_history(ticker, period=chart_period)
+                hist  = compute_indicators(hist)
+                price = quotes.get(ticker, {}).get("price")
 
-                rsi_col    = [c for c in hist.columns if c.startswith("RSI_14")]
-                macd_col   = [c for c in hist.columns if c.startswith("MACD_12_26")]
-                macds_col  = [c for c in hist.columns if c.startswith("MACDs_12")]
-                ema50_col  = [c for c in hist.columns if "EMA_50" in c]
-                ema200_col = [c for c in hist.columns if "EMA_200" in c]
-
-                rsi    = hist[rsi_col[0]].iloc[-1]    if rsi_col    else None
-                macd   = hist[macd_col[0]].iloc[-1]   if macd_col   else None
-                macds  = hist[macds_col[0]].iloc[-1]  if macds_col  else None
-                ema50  = hist[ema50_col[0]].iloc[-1]  if ema50_col  else None
-                ema200 = hist[ema200_col[0]].iloc[-1] if ema200_col else None
-                price  = quotes.get(ticker, {}).get("price")
+                rsi    = hist["RSI_14"].iloc[-1]        if "RSI_14" in hist.columns        else None
+                macd   = hist["MACD_12_26_9"].iloc[-1]  if "MACD_12_26_9" in hist.columns  else None
+                macds  = hist["MACDs_12_26_9"].iloc[-1] if "MACDs_12_26_9" in hist.columns else None
+                ema50  = hist["EMA_50"].iloc[-1]         if "EMA_50" in hist.columns         else None
+                ema200 = hist["EMA_200"].iloc[-1]        if "EMA_200" in hist.columns        else None
 
                 ind_rows.append({
                     "Ticker":      ticker,
-                    "RSI (14)":    round(rsi, 1) if rsi else None,
-                    "RSI signal":  ("OB ⚠️" if rsi >= 75 else ("OS 🟢" if rsi <= 35 else "Neutral")) if rsi else "—",
-                    "MACD signal": ("Bull 🟢" if macd > macds else "Bear 🔴") if (macd is not None and macds is not None) else "—",
-                    "MACD value":  round(macd, 3) if macd else None,
-                    "MA cross":    ("Golden ✅" if ema50 > ema200 else "Death ❌") if (ema50 and ema200) else "—",
-                    "vs EMA-50":   (f"+{((price-ema50)/ema50*100):.1f}%" if price > ema50 else f"{((price-ema50)/ema50*100):.1f}%") if (price and ema50) else "—",
-                    "EMA-50":      f"${ema50:.2f}"  if ema50  else "—",
-                    "EMA-200":     f"${ema200:.2f}" if ema200 else "—",
+                    "RSI (14)":    round(float(rsi), 1) if rsi is not None and not pd.isna(rsi) else None,
+                    "RSI signal":  ("OB ⚠️" if rsi >= 75 else ("OS 🟢" if rsi <= 35 else "Neutral")) if (rsi is not None and not pd.isna(rsi)) else "—",
+                    "MACD signal": ("Bull 🟢" if macd > macds else "Bear 🔴") if (macd is not None and macds is not None and not pd.isna(macd) and not pd.isna(macds)) else "—",
+                    "MACD value":  round(float(macd), 3) if macd is not None and not pd.isna(macd) else None,
+                    "MA cross":    ("Golden ✅" if ema50 > ema200 else "Death ❌") if (ema50 is not None and ema200 is not None and not pd.isna(ema50) and not pd.isna(ema200)) else "—",
+                    "vs EMA-50":   (f"+{((price-ema50)/ema50*100):.1f}%" if price > ema50 else f"{((price-ema50)/ema50*100):.1f}%") if (price and ema50 is not None and not pd.isna(ema50)) else "—",
+                    "EMA-50":      f"${float(ema50):.2f}"  if ema50  is not None and not pd.isna(ema50)  else "—",
+                    "EMA-200":     f"${float(ema200):.2f}" if ema200 is not None and not pd.isna(ema200) else "—",
                 })
             except Exception:
                 ind_rows.append({
@@ -286,16 +291,6 @@ if show_chart and tickers:
         hist = fetch_history(selected, period=chart_period)
         hist = compute_indicators(hist)
 
-    rsi_col    = [c for c in hist.columns if c.startswith("RSI_14")]
-    macd_col   = [c for c in hist.columns if "MACD_12_26_9" in c and "MACDs" not in c and "MACDh" not in c]
-    macds_col  = [c for c in hist.columns if c.startswith("MACDs_12")]
-    macdh_col  = [c for c in hist.columns if c.startswith("MACDh_12")]
-    bbu_col    = [c for c in hist.columns if "BBU" in c]
-    bbl_col    = [c for c in hist.columns if "BBL" in c]
-    bbm_col    = [c for c in hist.columns if "BBM" in c]
-    ema50_col  = [c for c in hist.columns if "EMA_50" in c]
-    ema200_col = [c for c in hist.columns if "EMA_200" in c]
-
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True,
         vertical_spacing=0.04, row_heights=[0.55, 0.22, 0.23],
@@ -308,19 +303,19 @@ if show_chart and tickers:
         increasing_line_color="#1D9E75", decreasing_line_color="#E24B4A",
     ), row=1, col=1)
 
-    if bbu_col and bbl_col and bbm_col:
-        fig.add_trace(go.Scatter(x=hist.index, y=hist[bbu_col[0]], name="BB Upper",
+    if "BBU_20" in hist.columns:
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["BBU_20"], name="BB Upper",
                                  line=dict(color="#B5D4F4", width=1, dash="dot")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=hist.index, y=hist[bbm_col[0]], name="BB Mid",
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["BBM_20"], name="BB Mid",
                                  line=dict(color="#888780", width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=hist.index, y=hist[bbl_col[0]], name="BB Lower",
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["BBL_20"], name="BB Lower",
                                  line=dict(color="#B5D4F4", width=1, dash="dot"),
                                  fill="tonexty", fillcolor="rgba(181,212,244,0.08)"), row=1, col=1)
-    if ema50_col:
-        fig.add_trace(go.Scatter(x=hist.index, y=hist[ema50_col[0]], name="EMA 50",
+    if "EMA_50" in hist.columns:
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["EMA_50"], name="EMA 50",
                                  line=dict(color="#EF9F27", width=1.5)), row=1, col=1)
-    if ema200_col:
-        fig.add_trace(go.Scatter(x=hist.index, y=hist[ema200_col[0]], name="EMA 200",
+    if "EMA_200" in hist.columns:
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["EMA_200"], name="EMA 200",
                                  line=dict(color="#D4537E", width=1.5, dash="dash")), row=1, col=1)
 
     entry_price = entries.get(selected)
@@ -329,22 +324,22 @@ if show_chart and tickers:
                       annotation_text=f"Entry ${entry_price:.2f}",
                       annotation_position="bottom right", row=1, col=1)
 
-    if rsi_col:
-        fig.add_trace(go.Scatter(x=hist.index, y=hist[rsi_col[0]], name="RSI",
+    if "RSI_14" in hist.columns:
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["RSI_14"], name="RSI",
                                  line=dict(color="#378ADD", width=1.5)), row=2, col=1)
         fig.add_hline(y=70, line_dash="dot", line_color="#BA7517", row=2, col=1)
         fig.add_hline(y=30, line_dash="dot", line_color="#1D9E75", row=2, col=1)
         fig.add_hrect(y0=70, y1=100, fillcolor="rgba(186,117,23,0.07)", row=2, col=1)
         fig.add_hrect(y0=0,  y1=30,  fillcolor="rgba(29,158,117,0.07)", row=2, col=1)
 
-    if macd_col and macds_col:
-        fig.add_trace(go.Scatter(x=hist.index, y=hist[macd_col[0]], name="MACD",
+    if "MACD_12_26_9" in hist.columns and "MACDs_12_26_9" in hist.columns:
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["MACD_12_26_9"], name="MACD",
                                  line=dict(color="#378ADD", width=1.5)), row=3, col=1)
-        fig.add_trace(go.Scatter(x=hist.index, y=hist[macds_col[0]], name="Signal",
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["MACDs_12_26_9"], name="Signal",
                                  line=dict(color="#D4537E", width=1.5)), row=3, col=1)
-    if macdh_col:
-        colors = ["#1D9E75" if v >= 0 else "#E24B4A" for v in hist[macdh_col[0]]]
-        fig.add_trace(go.Bar(x=hist.index, y=hist[macdh_col[0]], name="Histogram",
+    if "MACDh_12_26_9" in hist.columns:
+        colors = ["#1D9E75" if v >= 0 else "#E24B4A" for v in hist["MACDh_12_26_9"].fillna(0)]
+        fig.add_trace(go.Bar(x=hist.index, y=hist["MACDh_12_26_9"], name="Histogram",
                              marker_color=colors, opacity=0.6), row=3, col=1)
 
     fig.update_layout(
@@ -362,10 +357,10 @@ if show_chart and tickers:
 
     fund = watchlist[selected]
     fc1, fc2, fc3, fc4 = st.columns(4)
-    fc1.metric("Rank",     f"#{fund['rank']}")
-    fc2.metric("OCF",      fund["ocf_label"])
-    fc3.metric("LT Debt",  fund["debt_label"])
-    fc4.metric("D/E",      f"{float(fund['de_ratio']):.2f}")
+    fc1.metric("Rank",    f"#{fund['rank']}")
+    fc2.metric("OCF",     fund["ocf_label"])
+    fc3.metric("LT Debt", fund["debt_label"])
+    fc4.metric("D/E",     f"{float(fund['de_ratio']):.2f}")
     if fund.get("notes"):
         st.caption(f"💬 {fund['notes']}")
 
