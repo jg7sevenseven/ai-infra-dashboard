@@ -1,6 +1,6 @@
 """
-db.py — Supabase persistence layer
-Handles watchlist and entry price storage.
+db.py — Supabase persistence layer (direct httpx, no supabase-py client)
+Works with both legacy anon keys and new sb_publishable_ keys.
 
 Tables required (run supabase_setup.sql to create):
   watchlist   — ticker metadata + fundamental scores
@@ -8,27 +8,59 @@ Tables required (run supabase_setup.sql to create):
 """
 
 from __future__ import annotations
-import os
-import streamlit as st
-from supabase import create_client, Client
 from typing import Optional
+import streamlit as st
+import httpx
 
-# ── Client singleton ──────────────────────────────────────────────────────────
+
+# ── HTTP client singleton ─────────────────────────────────────────────────────
 
 @st.cache_resource
-def get_client() -> Client:
-    url  = st.secrets["SUPABASE_URL"]
-    key  = st.secrets["SUPABASE_ANON_KEY"]
-    return create_client(url, key)
+def _headers() -> dict:
+    key = st.secrets["SUPABASE_ANON_KEY"]
+    return {
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type":  "application/json",
+        "Prefer":        "return=representation",
+    }
+
+@st.cache_resource
+def _base_url() -> str:
+    url = st.secrets["SUPABASE_URL"].rstrip("/")
+    return f"{url}/rest/v1"
+
+def _get(path: str, params: dict | None = None) -> list:
+    r = httpx.get(f"{_base_url()}/{path}", headers=_headers(), params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+def _post(path: str, data: dict | list) -> list:
+    r = httpx.post(f"{_base_url()}/{path}", headers=_headers(), json=data, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+def _patch(path: str, data: dict, params: dict) -> list:
+    r = httpx.patch(f"{_base_url()}/{path}", headers=_headers(), json=data, params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+def _delete(path: str, params: dict) -> None:
+    r = httpx.delete(f"{_base_url()}/{path}", headers=_headers(), params=params, timeout=10)
+    r.raise_for_status()
+
+def _upsert(path: str, data: dict | list) -> list:
+    h = {**_headers(), "Prefer": "resolution=merge-duplicates,return=representation"}
+    r = httpx.post(f"{_base_url()}/{path}", headers=h, json=data, timeout=10)
+    r.raise_for_status()
+    return r.json()
 
 
 # ── Watchlist CRUD ────────────────────────────────────────────────────────────
 
 def load_watchlist() -> list[dict]:
-    """Return all watchlist rows, ordered by rank."""
-    client = get_client()
-    res = client.table("watchlist").select("*").order("rank").execute()
-    return res.data or []
+    """Return all watchlist rows ordered by rank."""
+    return _get("watchlist", params={"select": "*", "order": "rank.asc"})
 
 
 def upsert_ticker(
@@ -36,16 +68,14 @@ def upsert_ticker(
     name:       str,
     sector:     str,
     rank:       int,
-    ocf_score:  int  = 50,
-    debt_score: int  = 50,
-    ocf_label:  str  = "—",
-    debt_label: str  = "—",
+    ocf_score:  int   = 50,
+    debt_score: int   = 50,
+    ocf_label:  str   = "—",
+    debt_label: str   = "—",
     de_ratio:   float = 0.0,
-    notes:      str  = "",
+    notes:      str   = "",
 ) -> None:
-    """Insert or update a watchlist row (upsert on ticker)."""
-    client = get_client()
-    client.table("watchlist").upsert({
+    _upsert("watchlist", {
         "ticker":     ticker.upper().strip(),
         "name":       name.strip(),
         "sector":     sector.strip(),
@@ -56,51 +86,41 @@ def upsert_ticker(
         "debt_label": debt_label,
         "de_ratio":   de_ratio,
         "notes":      notes,
-    }, on_conflict="ticker").execute()
+    })
 
 
 def delete_ticker(ticker: str) -> None:
-    """Remove a ticker from watchlist (and cascade-delete its entry)."""
-    client = get_client()
-    client.table("entries").delete().eq("ticker", ticker.upper()).execute()
-    client.table("watchlist").delete().eq("ticker", ticker.upper()).execute()
+    t = ticker.upper()
+    _delete("entries",   params={"ticker": f"eq.{t}"})
+    _delete("watchlist", params={"ticker": f"eq.{t}"})
 
 
 def reorder_watchlist(ordered_tickers: list[str]) -> None:
-    """Update rank column to match the supplied order."""
-    client = get_client()
     for i, ticker in enumerate(ordered_tickers, start=1):
-        client.table("watchlist").update({"rank": i}).eq("ticker", ticker).execute()
+        _patch("watchlist", data={"rank": i}, params={"ticker": f"eq.{ticker}"})
 
 
 # ── Entry prices CRUD ─────────────────────────────────────────────────────────
 
 def load_entries() -> dict[str, Optional[float]]:
-    """Return {ticker: entry_price} for all tickers that have an entry set."""
-    client = get_client()
-    res = client.table("entries").select("ticker, entry_price").execute()
-    return {row["ticker"]: row["entry_price"] for row in (res.data or [])}
+    rows = _get("entries", params={"select": "ticker,entry_price"})
+    return {r["ticker"]: r["entry_price"] for r in rows}
 
 
 def set_entry(ticker: str, price: Optional[float]) -> None:
-    """Upsert an entry price for a ticker. Pass None/0 to clear."""
-    client = get_client()
+    t = ticker.upper()
     if price and price > 0:
-        client.table("entries").upsert(
-            {"ticker": ticker.upper(), "entry_price": round(price, 4)},
-            on_conflict="ticker"
-        ).execute()
+        _upsert("entries", {"ticker": t, "entry_price": round(price, 4)})
     else:
-        client.table("entries").delete().eq("ticker", ticker.upper()).execute()
+        _delete("entries", params={"ticker": f"eq.{t}"})
 
 
 def set_entries_bulk(entries: dict[str, Optional[float]]) -> None:
-    """Batch-update entry prices from a {ticker: price} dict."""
     for ticker, price in entries.items():
         set_entry(ticker, price)
 
 
-# ── Seed helper (first-run only) ──────────────────────────────────────────────
+# ── Seed helper ───────────────────────────────────────────────────────────────
 
 DEFAULT_WATCHLIST = [
     dict(ticker="NVDA", name="NVIDIA Corporation",         sector="Semiconductors", rank=1,  ocf_score=100, debt_score=96,  ocf_label="$64.1B",    debt_label="~$8.5B",  de_ratio=0.10, notes="Dominant OCF; minimal leverage"),
@@ -118,8 +138,7 @@ DEFAULT_WATCHLIST = [
 
 def seed_defaults_if_empty() -> None:
     """Only seeds if watchlist table is empty — safe to call on every startup."""
-    client = get_client()
-    existing = client.table("watchlist").select("ticker").execute()
-    if not existing.data:
+    existing = load_watchlist()
+    if not existing:
         for row in DEFAULT_WATCHLIST:
-            client.table("watchlist").upsert(row, on_conflict="ticker").execute()
+            _upsert("watchlist", row)
