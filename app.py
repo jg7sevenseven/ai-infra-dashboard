@@ -82,10 +82,18 @@ def fetch_quotes(tickers_tuple: tuple) -> dict:
 
 @st.cache_data(ttl=300)
 def fetch_history(ticker: str, period: str = "3mo") -> pd.DataFrame:
-    df = yf.download(ticker, period=period, interval="1d",
+    """Always fetch 2y for accurate EMA-200; trim for display separately."""
+    df = yf.download(ticker, period="2y", interval="1d",
                      auto_adjust=True, progress=False)
     df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
     return df.dropna()
+
+PERIOD_DAYS = {"1mo": 21, "3mo": 63, "6mo": 126, "1y": 252, "2y": 504}
+
+def trim_to_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
+    """Slice last N bars for display while full history was used for indicators."""
+    n = PERIOD_DAYS.get(period, 63)
+    return df.iloc[-n:] if len(df) > n else df
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -145,6 +153,7 @@ with st.sidebar:
         st.success("Entry prices saved to Supabase ✓")
 
     st.markdown("---")
+    st.page_link("pages/2_Analysis.py", label="🔬 Swing trade analysis")
     st.page_link("pages/1_Admin.py", label="🛠️ Manage watchlist")
     st.markdown("---")
     st.caption(
@@ -240,7 +249,7 @@ if show_indicators:
         ind_rows = []
         for ticker in tickers:
             try:
-                hist  = fetch_history(ticker, period=chart_period)
+                hist  = fetch_history(ticker)
                 hist  = compute_indicators(hist)
                 price = quotes.get(ticker, {}).get("price")
 
@@ -288,8 +297,9 @@ if show_chart and tickers:
         format_func=lambda t: f"{t} — {watchlist[t]['name']}",
     )
     with st.spinner(f"Loading chart for {selected}…"):
-        hist = fetch_history(selected, period=chart_period)
-        hist = compute_indicators(hist)
+        hist_full = fetch_history(selected)
+        hist_full = compute_indicators(hist_full)
+        hist = trim_to_period(hist_full, chart_period)
 
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True,
@@ -373,7 +383,8 @@ with st.expander("📊 30-day return correlation heatmap", expanded=False):
         try:
             price_data = {}
             for t in tickers:
-                h = fetch_history(t, period="1mo")
+                h_full = fetch_history(t)
+                h = trim_to_period(h_full, "1mo")
                 if not h.empty:
                     price_data[t] = h["Close"]
             corr = pd.DataFrame(price_data).dropna().pct_change().corr().round(2)
